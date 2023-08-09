@@ -8,35 +8,25 @@ authors = [
     "Tal Shani <tal@quantum-machines.co>"
 ]
 license = "BSD-3-Clause"
-packages = [
-    { include = "entropylab_qpudb" }
-]
-include = [
-    "CHANGELOG.md",
-    "LICENSE",
-]
-exclude = [
-    "**/tests/**",
-]
+packages = [{include = "entropylab_qpudb"}]
+include = ["CHANGELOG.md", "LICENSE"]
+exclude = ["**/tests/**"]
 readme = "README.md"
 homepage = "https://github.com/entropy-lab/entropy-qpu"
 
 [tool.poetry.dependencies]
-python = "^3.7.1"
-ZODB = "^5.6.0"
-pandas = "^1.2.4"
-entropylab = "^0.1.2"
+python = "^3.9"
+ZODB = "^5.8.1"
+pandas = "^2.0.3"
+entropylab = {git = "https://github.com/PainterQubits/entropy.git", rev = "v0.1.2-with-sqlalchemy-2.0"}
 
-[tool.poetry.dev-dependencies]
-black = "^20.8b1"
-poethepoet = "^0.10.0"
-pytest = "^6.2.5"
-flake8 = "^4.0.1"
-flake8-bugbear = "^21.9.2"
-pytest-cov = "^3.0.0"
-
-[tool.pytest.ini_options]
-
+[tool.poetry.group.dev.dependencies]
+black = "^23.7.0"
+poethepoet = "^0.21.1"
+pytest = "^7.4.0"
+flake8 = "^6.1.0"
+flake8-bugbear = "^23.7.10"
+pytest-cov = "^4.1.0"
 
 [tool.poe.tasks.format]
 cmd = "black entropylab_qpudb"
@@ -58,7 +48,6 @@ help = "Run all unit tests"
 check = ["check-format", "lint", "test"]
 
 [tool.black]
-target-version = ["py37"]
 line-length = 88
 
 [build-system]
