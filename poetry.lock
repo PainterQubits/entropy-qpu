@@ -535,8 +535,8 @@ sqlalchemy = "^2.0.19"
 [package.source]
 type = "git"
 url = "https://github.com/PainterQubits/entropylab"
-reference = "v0.1.4"
-resolved_reference = "00e24689e8364d5bb6599be87a091ca2335d888b"
+reference = "HEAD"
+resolved_reference = "f44944471a72a90b038d3669b4fdca7ec40fe785"
 
 [[package]]
 name = "exceptiongroup"
@@ -2122,4 +2122,4 @@ testing = ["coverage (>=5.0.3)", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "222a181bbc0ad356b14477ac933680fc4766618351f89374463213e13cdd6adc"
+content-hash = "3dd5edf33c18178dd1a23d08f0b3e130905007ac91db8a4c38575c5d60223b69"
