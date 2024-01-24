@@ -231,25 +231,32 @@ class _QpuDatabaseConnectionBase(Resource):
             return db_hist
         old_histfilename = _hist_file_from_path(self._path, self._dbname, old=True)
         if os.path.exists(old_histfilename):
-            old_db_hist = ZODB.DB(old_histfilename, read_only=True)
-            # hack so commit timestamps match, based on internal ParamDB.commit()
-            # implementation
-            with db_hist._Session.begin() as session:
-                for entry in old_db_hist.open().root()["entries"]:
-                    connected_tx: Optional[bytes] = entry["connected_tx"]
-                    data = (
-                        None
-                        if connected_tx is None
-                        else base64.b64encode(connected_tx).decode()
-                    )
-                    session.add(
-                        _Snapshot(
-                            message=entry["message"],
-                            timestamp=entry["timestamp"],
-                            data=_compress(json.dumps(data)),
+            # copy the contents of the old history database into the new one
+            try:
+                old_db_hist = ZODB.DB(old_histfilename, read_only=True)
+                # hack so commit timestamps match, based on internal ParamDB.commit()
+                # implementation
+                with db_hist._Session.begin() as session:
+                    for entry in old_db_hist.open().root()["entries"]:
+                        connected_tx: Optional[bytes] = entry["connected_tx"]
+                        data = (
+                            None
+                            if connected_tx is None
+                            else base64.b64encode(connected_tx).decode()
                         )
-                    )
-            return db_hist
+                        session.add(
+                            _Snapshot(
+                                message=entry["message"] or "",
+                                timestamp=entry["timestamp"],
+                                data=_compress(json.dumps(data)),
+                            )
+                        )
+                return db_hist
+            except Exception as exc:
+                # remove the new history database if the conversion failed
+                db_hist.dispose()
+                os.remove(histfilename)
+                raise exc
         raise RuntimeError(f"no history database for qpu database {self._dbname}")
 
     def __enter__(self):
