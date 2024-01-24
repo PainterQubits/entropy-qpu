@@ -1,7 +1,6 @@
 import os
 import shutil
 from dataclasses import FrozenInstanceError
-from distutils.dir_util import copy_tree
 from glob import glob
 from time import sleep
 
@@ -456,7 +455,7 @@ def test_we_can_open_all_history_items(testdb):
         for v_bias in range(6):
             db.set("q1", "p1", v_bias)
             db.commit()
-            indices.append(len(db._con_hist.root()["entries"]) - 1)
+            indices.append(db._db_hist.num_commits - 1)
             expected_values.append(db.q(1).p1.value)
 
     # try to pull an item from all history entries
@@ -478,7 +477,7 @@ def test_we_can_open_all_history_items_in_same_connection(testdb):
         for v_bias in range(6):
             db.set("q1", "p1", v_bias)
             db.commit()
-            indices.append(len(db._con_hist.root()["entries"]) - 1)
+            indices.append(db._db_hist.num_commits - 1)
             expected_values.append(db.q(1).p1.value)
 
         # try to pull an item from all history entries
@@ -493,7 +492,9 @@ def test_migration_add_elements_persistence(request):
     db_name = "testdb1"
     path = os.path.join(request.fspath.dirname, "test_dbs", "before_migration")
     to_directory = "tests_cache/before_migration"
-    copy_tree(path, to_directory)
+    if os.path.exists(to_directory):
+        shutil.rmtree(to_directory)
+    shutil.copytree(path, to_directory)
 
     with _QpuDatabaseConnectionBase(db_name, path=to_directory) as db:
         db.add_element("q_new")
@@ -509,7 +510,9 @@ def test_migration_add_and_remove_elements_persistence(request):
     db_name = "testdb1"
     path = os.path.join(request.fspath.dirname, "test_dbs", "before_migration")
     to_directory = "tests_cache/before_migration"
-    copy_tree(path, to_directory)
+    if os.path.exists(to_directory):
+        shutil.rmtree(to_directory)
+    shutil.copytree(path, to_directory)
 
     with _QpuDatabaseConnectionBase(db_name, path=to_directory) as db:
         db.add_element("q_new")

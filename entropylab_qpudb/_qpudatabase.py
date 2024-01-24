@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 from copy import deepcopy
 from dataclasses import dataclass
@@ -8,11 +9,12 @@ from typing import Any, Type, Optional, Dict
 
 import ZODB
 import ZODB.FileStorage
+from paramdb import ParamDB, CommitEntry
+from paramdb._database import _Snapshot, _compress
 import pandas as pd
 import transaction
 from entropylab.instruments.instrument_driver import Resource
 from persistent import Persistent
-from persistent.list import PersistentList
 from persistent.mapping import PersistentMapping
 from zc.lockfile import LockError
 
@@ -89,8 +91,9 @@ def _db_file_from_path(path, dbname):
     return os.path.join(path, dbname + ".fs")
 
 
-def _hist_file_from_path(path, dbname):
-    return os.path.join(path, dbname + "_history.fs")
+def _hist_file_from_path(path, dbname, old: bool = False):
+    extension = "fs" if old else "db"
+    return os.path.join(path, dbname + f"_history.{extension}")
 
 
 def create_new_qpu_database(
@@ -146,21 +149,9 @@ def create_new_qpu_database(
 
     # create history db
     hist_filename = _hist_file_from_path(path, dbname)
-    storage_hist = ZODB.FileStorage.FileStorage(hist_filename)
-    db_hist = ZODB.DB(storage_hist)
-    connection_hist = db_hist.open()
-    root_hist = connection_hist.root()
-    root_hist["entries"] = PersistentList(
-        [
-            {
-                "timestamp": datetime.utcnow(),
-                "connected_tx": None,
-                "message": "initial commit",
-            }
-        ]
-    )
-    transaction.commit()
-    db_hist.close()
+    db_hist = ParamDB[Optional[str]](hist_filename)
+    db_hist.commit("Initial commit", None)
+    db_hist.dispose()
 
 
 class ReadOnlyError(Exception):
@@ -178,12 +169,11 @@ class _QpuDatabaseConnectionBase(Resource):
         pass
 
     def snapshot(self, update: bool) -> str:
-        hist_root = self._con_hist.root()
         return json.dumps(
             {
                 "qpu_name": self._dbname,
-                "index": len(hist_root["entries"]) - 1,
-                "message": hist_root["entries"][-1]["message"],
+                "index": self._db_hist.num_commits - 1,
+                "message": self._db_hist.latest_commit.message,
             }
         )
 
@@ -202,46 +192,65 @@ class _QpuDatabaseConnectionBase(Resource):
             raise FileNotFoundError(f"QPU DB {self._dbname} does not exist")
         self._db = None
         super().__init__()
-        self._con_hist = self._open_hist_db()
+        self._db_hist = self._open_hist_db()
         self._con = self._open_data_db(history_index)
 
     def _open_data_db(self, history_index):
         dbfilename = _db_file_from_path(self._path, self._dbname)
-        hist_entries = self._con_hist.root()["entries"]
+        assert self._db_hist.num_commits > 0, "history database is empty"
         if history_index is not None:
-            message_index = history_index
-            at = self._con_hist.root()["entries"][history_index]["connected_tx"]
+            commit_entry = self._db_hist.commit_history(
+                history_index, history_index + 1
+            )[0]
+            connected_tx = self._db_hist.load(commit_entry.id)
+            at = None if connected_tx is None else base64.b64decode(connected_tx)
         else:
-            message_index = len(hist_entries) - 1
+            commit_entry = self._db_hist.latest_commit
             at = None
         try:
             self._db = ZODB.DB(dbfilename) if self._db is None else self._db
         except LockError:
             raise ConnectionError(
-                f"attempting to open a connection to {self._dbname} but a connection already exists."
-                f"Try closing existing python sessions."
+                f"attempting to open a connection to {self._dbname} but a connection"
+                " already exists. Try closing existing python sessions."
             )
 
         con = self._db.open(transaction_manager=transaction.TransactionManager(), at=at)
         con.transaction_manager.begin()
         print(
-            f"opening qpu database {self._dbname} from "
-            f"commit {self._str_hist_entry(hist_entries[message_index])} at index {message_index}"
+            f"opening qpu database {self._dbname} from commit"
+            f" {self._str_hist_entry(commit_entry)} at index {commit_entry.id - 1}"
         )
         return con
 
     def _open_hist_db(self):
         histfilename = _hist_file_from_path(self._path, self._dbname)
-        try:
-            db_hist = ZODB.DB(histfilename)
-        except LockError:
-            raise ConnectionError(
-                f"attempting to open a connection to {self._dbname} but a connection already exists."
-                f"Try closing existing python sessions."
-            )
-        con_hist = db_hist.open(transaction_manager=transaction.TransactionManager())
-        con_hist.transaction_manager.begin()
-        return con_hist
+        db_hist_exists = os.path.exists(histfilename)
+        db_hist = ParamDB[Optional[str]](histfilename)
+        if db_hist_exists:
+            return db_hist
+        old_histfilename = _hist_file_from_path(self._path, self._dbname, old=True)
+        if os.path.exists(old_histfilename):
+            old_db_hist = ZODB.DB(old_histfilename, read_only=True)
+            # hack so commit timestamps match, based on internal ParamDB.commit()
+            # implementation
+            with db_hist._Session.begin() as session:
+                for entry in old_db_hist.open().root()["entries"]:
+                    connected_tx: Optional[bytes] = entry["connected_tx"]
+                    data = (
+                        None
+                        if connected_tx is None
+                        else base64.b64encode(connected_tx).decode()
+                    )
+                    session.add(
+                        _Snapshot(
+                            message=entry["message"],
+                            timestamp=entry["timestamp"],
+                            data=_compress(json.dumps(data)),
+                        )
+                    )
+            return db_hist
+        raise RuntimeError(f"no history database for qpu database {self._dbname}")
 
     def __enter__(self):
         return self
@@ -256,7 +265,7 @@ class _QpuDatabaseConnectionBase(Resource):
         """
         print(f"closing qpu database {self._dbname}")
         self._con._db.close()
-        self._con_hist._db.close()
+        self._db_hist.dispose()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
@@ -413,16 +422,16 @@ class _QpuDatabaseConnectionBase(Resource):
         self._con.transaction_manager.commit()
         lt_after = self._con._db.lastTransaction()
         if lt_before != lt_after:  # this means a commit actually took place
-            hist_root = self._con_hist.root()
-            hist_entries = hist_root["entries"]
-            now = datetime.utcnow()
-            hist_entries.append(
-                {"timestamp": now, "connected_tx": lt_after, "message": message}
+            commit_id = self._db_hist.commit(
+                message or "", base64.b64encode(lt_after).decode()
             )
-            self._con_hist.transaction_manager.commit()
+            message_index = commit_id - 1
+            commit_entry = self._db_hist.commit_history(
+                message_index, message_index + 1
+            )[0]
             print(
-                f"commiting qpu database {self._dbname} "
-                f"with commit {self._str_hist_entry(hist_entries[-1])} at index {len(hist_entries) - 1}"
+                f"commiting qpu database {self._dbname} with commit"
+                f" {self._str_hist_entry(commit_entry)} at index {message_index}"
             )
         else:
             print("did not commit")
@@ -445,11 +454,18 @@ class _QpuDatabaseConnectionBase(Resource):
                 print(f"{attr}:\t{data[element][attr]}")
 
     def get_history(self) -> pd.DataFrame:
-        return pd.DataFrame(self._con_hist.root()["entries"])
+        history = self._db_hist.commit_history()
+        return pd.DataFrame(
+            [{"timestamp": entry.timestamp, "message": entry.message}]
+            for entry in history
+        )
 
     @staticmethod
-    def _str_hist_entry(hist_entry):
-        return f"<timestamp: {hist_entry['timestamp'].strftime('%m/%d/%Y %H:%M:%S')}, message: {hist_entry['message']}>"
+    def _str_hist_entry(hist_entry: CommitEntry):
+        return (
+            f"<timestamp: {hist_entry.timestamp.strftime('%m/%d/%Y %H:%M:%S')},"
+            f" message: {hist_entry.message}>"
+        )
 
     def restore_from_history(self, history_index: int) -> None:
         """
