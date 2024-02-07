@@ -458,7 +458,7 @@ class _QpuDatabaseConnectionBase(Resource):
 
     def get_history(self) -> pd.DataFrame:
         history = self._db_hist.commit_history_with_data()
-        return pd.DataFrame.from_records(
+        return pd.DataFrame(
             [
                 {
                     "timestamp": entry.timestamp,
