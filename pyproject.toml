@@ -19,7 +19,8 @@ python = "^3.9"
 ZODB = "^5.8.1"
 pandas = "^2.0.3"
 entropylab = {git = "https://github.com/PainterQubits/entropylab"}
-paramdb = "^0.10.2"
+tqdm = "^4.66.1"
+paramdb = "^0.11.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.7.0"

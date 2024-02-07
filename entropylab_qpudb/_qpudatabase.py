@@ -7,10 +7,10 @@ from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Type, Optional, Dict
 
+from tqdm import tqdm
 import ZODB
 import ZODB.FileStorage
 from paramdb import ParamDB, CommitEntry
-from paramdb._database import _Snapshot, _compress
 import pandas as pd
 import transaction
 from entropylab.instruments.instrument_driver import Resource
@@ -169,11 +169,12 @@ class _QpuDatabaseConnectionBase(Resource):
         pass
 
     def snapshot(self, update: bool) -> str:
+        latest_commit = self._db_hist.load_commit_entry()
         return json.dumps(
             {
                 "qpu_name": self._dbname,
-                "index": self._db_hist.num_commits - 1,
-                "message": self._db_hist.latest_commit.message,
+                "index": latest_commit.id - 1,
+                "message": latest_commit.message,
             }
         )
 
@@ -199,13 +200,12 @@ class _QpuDatabaseConnectionBase(Resource):
         dbfilename = _db_file_from_path(self._path, self._dbname)
         assert self._db_hist.num_commits > 0, "history database is empty"
         if history_index is not None:
-            commit_entry = self._db_hist.commit_history(
-                history_index, history_index + 1
-            )[0]
-            connected_tx = self._db_hist.load(commit_entry.id)
+            commit_id = history_index + 1
+            commit_entry = self._db_hist.load_commit_entry(commit_id)
+            connected_tx = self._db_hist.load(commit_id)
             at = None if connected_tx is None else base64.b64decode(connected_tx)
         else:
-            commit_entry = self._db_hist.latest_commit
+            commit_entry = self._db_hist.load_commit_entry()
             at = None
         try:
             self._db = ZODB.DB(dbfilename) if self._db is None else self._db
@@ -226,35 +226,35 @@ class _QpuDatabaseConnectionBase(Resource):
     def _open_hist_db(self):
         histfilename = _hist_file_from_path(self._path, self._dbname)
         db_hist_exists = os.path.exists(histfilename)
-        db_hist = ParamDB[Optional[str]](histfilename)
         if db_hist_exists:
-            return db_hist
+            return ParamDB[Optional[str]](histfilename)
+
+        # if the history database does not exist, we attempt to copy the contents of the
+        # old ZODB-based history database into the new ParamDB-based one
         old_histfilename = _hist_file_from_path(self._path, self._dbname, old=True)
         if os.path.exists(old_histfilename):
-            # copy the contents of the old history database into the new one
+            print(f"converting from ZODB-based history DB {old_histfilename}...")
             try:
+                new_db_hist = ParamDB[Optional[str]](histfilename)
                 old_db_hist = ZODB.DB(old_histfilename, read_only=True)
-                # hack so commit timestamps match, based on internal ParamDB.commit()
-                # implementation
-                with db_hist._Session.begin() as session:
-                    for entry in old_db_hist.open().root()["entries"]:
-                        connected_tx: Optional[bytes] = entry["connected_tx"]
-                        data = (
-                            None
-                            if connected_tx is None
-                            else base64.b64encode(connected_tx).decode()
-                        )
-                        session.add(
-                            _Snapshot(
-                                message=entry["message"] or "",
-                                timestamp=entry["timestamp"],
-                                data=_compress(json.dumps(data)),
-                            )
-                        )
-                return db_hist
+                for entry in tqdm(old_db_hist.open().root()["entries"]):
+                    connected_tx: Optional[bytes] = entry["connected_tx"]
+                    data = (
+                        None
+                        if connected_tx is None
+                        else base64.b64encode(connected_tx).decode()
+                    )
+                    new_db_hist.commit(
+                        entry["message"] or "", data, timestamp=entry["timestamp"]
+                    )
+                print(
+                    f"finished converting ZODB-based history DB '{old_histfilename}' to"
+                    f" new ParamDB-based history DB '{histfilename}'"
+                )
+                return new_db_hist
             except Exception as exc:
-                # remove the new history database if the conversion failed
-                db_hist.dispose()
+                # clean up and delete the new history database if the conversion failed
+                new_db_hist.dispose()
                 os.remove(histfilename)
                 raise exc
         raise RuntimeError(f"no history database for qpu database {self._dbname}")
@@ -429,16 +429,12 @@ class _QpuDatabaseConnectionBase(Resource):
         self._con.transaction_manager.commit()
         lt_after = self._con._db.lastTransaction()
         if lt_before != lt_after:  # this means a commit actually took place
-            commit_id = self._db_hist.commit(
+            commit_entry = self._db_hist.commit(
                 message or "", base64.b64encode(lt_after).decode()
             )
-            message_index = commit_id - 1
-            commit_entry = self._db_hist.commit_history(
-                message_index, message_index + 1
-            )[0]
             print(
                 f"commiting qpu database {self._dbname} with commit"
-                f" {self._str_hist_entry(commit_entry)} at index {message_index}"
+                f" {self._str_hist_entry(commit_entry)} at index {commit_entry.id - 1}"
             )
         else:
             print("did not commit")
@@ -461,10 +457,18 @@ class _QpuDatabaseConnectionBase(Resource):
                 print(f"{attr}:\t{data[element][attr]}")
 
     def get_history(self) -> pd.DataFrame:
-        history = self._db_hist.commit_history()
-        return pd.DataFrame(
-            [{"timestamp": entry.timestamp, "message": entry.message}]
-            for entry in history
+        history = self._db_hist.commit_history_with_data()
+        return pd.DataFrame.from_records(
+            [
+                {
+                    "timestamp": entry.timestamp,
+                    "connected_tx": (
+                        None if entry.data is None else base64.b64decode(entry.data)
+                    ),
+                    "message": entry.message,
+                }
+                for entry in history
+            ]
         )
 
     @staticmethod
